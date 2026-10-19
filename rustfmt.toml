@@ -1,0 +1,5 @@
+# A bare `rustfmt file.rs` (no --edition) defaults to edition 2015 and rewrites
+# import ordering into the old style, which is drift against what cargo fmt
+# produces. Pinning both here makes any invocation agree with the crate's.
+edition = "2024"
+style_edition = "2024"
