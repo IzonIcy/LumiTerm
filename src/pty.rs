@@ -191,18 +191,7 @@ impl TerminalSession {
     }
 
     pub fn scroll_by_lines(&mut self, delta_lines: i32) {
-        if delta_lines == 0 {
-            return;
-        }
-
-        let screen = self.parser.screen_mut();
-        let current = screen.scrollback();
-        let target = if delta_lines > 0 {
-            current.saturating_add(delta_lines as usize)
-        } else {
-            current.saturating_sub((-delta_lines) as usize)
-        };
-        screen.set_scrollback(target);
+        scroll_parser_by_lines(&mut self.parser, delta_lines);
     }
 
     pub fn jump_to_live_output(&mut self) {
@@ -263,6 +252,28 @@ fn window_matches(screen: &mut Screen, cols: u16, needle: &str) -> bool {
     screen
         .rows(0, cols)
         .any(|row| row.to_lowercase().contains(needle))
+}
+
+/// Scrolls `parser`'s view by `delta_lines`, saturating at both ends. Positive
+/// moves into the scrollback, negative moves back towards the live screen.
+///
+/// Pure over a `Parser` (no PTY) so the arithmetic is unit-testable.
+pub fn scroll_parser_by_lines(parser: &mut Parser, delta_lines: i32) {
+    if delta_lines == 0 {
+        return;
+    }
+
+    let screen = parser.screen_mut();
+    let current = screen.scrollback();
+    let target = if delta_lines > 0 {
+        current.saturating_add(delta_lines as usize)
+    } else {
+        // `unsigned_abs`, not `-delta_lines`: negating `i32::MIN` overflows,
+        // which panics in a debug build. The wheel cannot produce it, but the
+        // arithmetic should not rely on that.
+        current.saturating_sub(delta_lines.unsigned_abs() as usize)
+    };
+    screen.set_scrollback(target);
 }
 
 /// Scrolls `parser`'s view back to the nearest line containing `query`,
@@ -421,7 +432,7 @@ pub fn screen_to_snapshot(parser: &Parser) -> TerminalSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{CellStyle, screen_to_snapshot, search_parser_scrollback};
+    use super::{CellStyle, screen_to_snapshot, scroll_parser_by_lines, search_parser_scrollback};
     use vt100::{Color, Parser};
 
     fn parse_with_size(rows: u16, cols: u16, input: &str) -> Parser {
@@ -754,6 +765,53 @@ mod tests {
         assert!(
             hit_elapsed < std::time::Duration::from_millis(500),
             "nearest-match search took {hit_elapsed:?}; it should not scan the whole buffer"
+        );
+    }
+
+    // ---- scrolling ----
+
+    #[test]
+    fn scrolling_saturates_at_both_ends() {
+        let lines: Vec<String> = (0..40).map(|index| format!("line {index}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let mut parser = parser_fed_with(&refs, 10, 40);
+
+        // Ask the parser where the top actually is rather than assuming the
+        // line accounting, then return to the live screen.
+        parser.screen_mut().set_scrollback(usize::MAX);
+        let top = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(0);
+        assert!(
+            top > 0,
+            "40 lines on a 10 row screen should leave scrollback"
+        );
+
+        scroll_parser_by_lines(&mut parser, 5);
+        assert_eq!(parser.screen().scrollback(), 5);
+
+        scroll_parser_by_lines(&mut parser, -3);
+        assert_eq!(
+            parser.screen().scrollback(),
+            2,
+            "back towards the live screen"
+        );
+
+        scroll_parser_by_lines(&mut parser, 0);
+        assert_eq!(parser.screen().scrollback(), 2, "zero is a no-op");
+
+        // Negating i32::MIN overflows, which panicked in a debug build.
+        scroll_parser_by_lines(&mut parser, i32::MIN);
+        assert_eq!(
+            parser.screen().scrollback(),
+            0,
+            "clamps at the live screen instead of overflowing"
+        );
+
+        scroll_parser_by_lines(&mut parser, i32::MAX);
+        assert_eq!(
+            parser.screen().scrollback(),
+            top,
+            "clamps at the oldest scrollback line"
         );
     }
 
