@@ -1,6 +1,7 @@
 use crate::config::TerminalConfig;
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use std::num::NonZeroU16;
 use std::{
     io::{Read, Write},
     path::PathBuf,
@@ -8,6 +9,12 @@ use std::{
     thread,
 };
 use vt100::{Color, Parser, Screen};
+
+/// vt100 0.18 takes terminal dimensions as `NonZeroU16`. A zero-row or
+/// zero-column terminal is not meaningful, so clamp to one instead of failing.
+fn nonzero(value: u16) -> NonZeroU16 {
+    NonZeroU16::new(value).unwrap_or(NonZeroU16::MIN)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellStyle {
@@ -110,7 +117,7 @@ impl TerminalSession {
             .context("starting PTY reader thread")?;
 
         Ok(Self {
-            parser: Parser::new(rows, cols, config.scrollback),
+            parser: Parser::new(nonzero(rows), nonzero(cols), config.scrollback),
             master: pty_pair.master,
             writer,
             output_rx,
@@ -186,7 +193,9 @@ impl TerminalSession {
             })
             .context("resizing PTY")?;
 
-        self.parser.screen_mut().set_size(rows, cols);
+        self.parser
+            .screen_mut()
+            .set_size(nonzero(rows), nonzero(cols));
         Ok(())
     }
 
@@ -304,6 +313,7 @@ pub fn search_parser_scrollback(parser: &mut Parser, query: &str) -> Option<usiz
     let screen = parser.screen_mut();
     let original = screen.scrollback();
     let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
     let stride = (rows as usize).max(1);
 
     // Find the top of the scrollback: set_scrollback saturates, so probe
@@ -359,6 +369,7 @@ pub fn search_parser_scrollback(parser: &mut Parser, query: &str) -> Option<usiz
 pub fn screen_to_snapshot(parser: &Parser) -> TerminalSnapshot {
     let screen = parser.screen();
     let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
     let (cursor_row, cursor_col) = screen.cursor_position();
     let mut styled_rows = Vec::with_capacity(rows as usize);
     let cursor = if screen.scrollback() == 0 {
@@ -432,11 +443,13 @@ pub fn screen_to_snapshot(parser: &Parser) -> TerminalSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{CellStyle, screen_to_snapshot, scroll_parser_by_lines, search_parser_scrollback};
+    use super::{
+        CellStyle, nonzero, screen_to_snapshot, scroll_parser_by_lines, search_parser_scrollback,
+    };
     use vt100::{Color, Parser};
 
     fn parse_with_size(rows: u16, cols: u16, input: &str) -> Parser {
-        let mut parser = Parser::new(rows, cols, 10_000);
+        let mut parser = Parser::new(nonzero(rows), nonzero(cols), 10_000);
         parser.process(input.as_bytes());
         parser
     }
@@ -444,7 +457,7 @@ mod tests {
     /// Feeds newline-terminated lines through the parser so earlier ones are
     /// pushed into the scrollback buffer.
     fn parser_fed_with(lines: &[&str], rows: u16, cols: u16) -> Parser {
-        let mut parser = Parser::new(rows, cols, 50_000);
+        let mut parser = Parser::new(nonzero(rows), nonzero(cols), 50_000);
         for line in lines {
             parser.process(format!("{line}\r\n").as_bytes());
         }
@@ -514,7 +527,7 @@ mod tests {
 
     #[test]
     fn cursor_inversion_disappears_in_scrollback() {
-        let mut parser = Parser::new(2, 10, 10_000);
+        let mut parser = Parser::new(nonzero(2), nonzero(10), 10_000);
         // Push several lines so content scrolls off the live screen.
         for line in 0..6 {
             parser.process(format!("line {line}\r\n").as_bytes());
@@ -712,7 +725,7 @@ mod tests {
         // oldest line down to the user's position — so this worst case (no
         // match, full 10k buffer) allocated tens of megabytes and took
         // seconds on a single Enter press.
-        let mut parser = Parser::new(24, 80, 50_000);
+        let mut parser = Parser::new(nonzero(24), nonzero(80), 50_000);
         let marker = "depth-marker-first-line";
         parser.process(format!("{marker}\r\n").as_bytes());
         let filler = "x".repeat(200);
