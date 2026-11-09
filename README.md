@@ -21,7 +21,7 @@ cargo run
 
 Opens a terminal window connected to your default shell.
 
-## Run it
+## Shortcuts
 
 - `Cmd+Ctrl+F` opens scrollback search, `Cmd+T` opens a new tab,
   `Cmd+Shift+W` closes the active tab.
