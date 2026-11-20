@@ -45,6 +45,10 @@ Stop the capture after the hold. Do not close the window on camera, since the ap
 
 ## Shooting it
 
+**Do not pass `-V`.** `screencapture -V <seconds>` is what produced the frozen tail described above: the file reports its full length while the last stretch repeats one frame. Start the recording with no duration limit and stop it with `kill -INT` instead.
+
+`ffmpeg` is not installed on the machine these were written on. [LumiComp's docs/demo.md](https://github.com/IzonIcy/LumiComp/blob/main/docs/demo.md) carries Swift replacements for both jobs, frame extraction and trimming, which work anywhere a Swift toolchain does.
+
 Record the window, not the screen. macOS wants a window id for that, and `screencapture` will not look one up, so save this as `/tmp/winid.swift` and pass the id:
 
 ```swift
@@ -70,7 +74,7 @@ The file's duration says nothing about whether the frames are live. Pull frames 
 
 ```sh
 for t in 4 10 20 32 44 54; do
-    ffmpeg -loglevel error -ss "$t" -i demo.mov -frames:v 1 "frame-$t.png" -y
+    swift /tmp/frame.swift demo.mov "frame-$t.png" "$t"
 done
 ```
 
@@ -79,7 +83,7 @@ The frames must differ, the one at 20 seconds must show two sidebar rows, and th
 Trim and compress:
 
 ```sh
-ffmpeg -i demo.mov -c:v libx264 -pix_fmt yuv420p -crf 28 -an demo.mp4
+swift /tmp/clip.swift demo.mov demo.mp4 0 52
 ```
 
 ## Putting it in the README
