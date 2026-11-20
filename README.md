@@ -97,6 +97,7 @@ src/
 ├── main.rs           # eframe entry point, config load, viewport setup
 ├── app.rs            # app state, tabs, key encoding, grid and chrome drawing, config hot-reload
 ├── pty.rs            # PTY spawn, VT parsing, screen snapshots, scrollback search
+├── agent_status.rs   # process-tree scan, agent matching, per-tab state
 ├── config.rs         # TOML load-or-create, defaults
 └── chrome_bridge.rs  # FFI declarations for the native C chrome bridge
 

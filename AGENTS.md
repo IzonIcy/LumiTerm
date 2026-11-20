@@ -27,6 +27,7 @@ src/
 ├── app.rs            # App state, tabs, key encoding, grid + chrome rendering, config hot-reload
 ├── pty.rs            # PTY spawn, VT parsing, screen snapshots, scrollback search
 ├── config.rs         # TOML load-or-create, defaults
+├── agent_status.rs   # process-tree scan, agent matching, per-tab state
 └── chrome_bridge.rs  # FFI declarations for the native C chrome bridge
 
 native/
@@ -38,7 +39,7 @@ The data path: PTY output → `vt100` parser (in `pty.rs`) → screen snapshot �
 
 Line counts for reference: `app.rs` ~1.8k, `pty.rs` ~700, `config.rs` ~230, `chrome_bridge.rs` ~170, `main.rs` ~40.
 
-Tests sit in each module under `#[cfg(test)]` — 65 in total: key encoding, config hot-reload, and palette/grid resolution in `app.rs`; parser and snapshot behaviour in `pty.rs`; palette resolution in `chrome_bridge.rs`; config loading in `config.rs`.
+Tests sit in each module under `#[cfg(test)]`, 74 in total: agent detection and state transitions in `agent_status.rs`; key encoding, config hot-reload, and palette/grid resolution in `app.rs`; parser and snapshot behaviour in `pty.rs`; palette resolution in `chrome_bridge.rs`; config loading in `config.rs`.
 
 ## Background I Already Have
 
