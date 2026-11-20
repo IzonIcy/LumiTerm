@@ -1,3 +1,4 @@
+mod agent_status;
 mod app;
 mod chrome_bridge;
 mod config;

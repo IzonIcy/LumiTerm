@@ -7,6 +7,7 @@ use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver},
     thread,
+    time::{Duration, Instant},
 };
 use vt100::{Color, Parser, Screen};
 
@@ -46,6 +47,7 @@ pub struct TerminalSession {
     output_rx: Receiver<Vec<u8>>,
     child: Option<Box<dyn portable_pty::Child + Send>>,
     closed: bool,
+    last_output: Instant,
 }
 
 impl TerminalSession {
@@ -123,6 +125,7 @@ impl TerminalSession {
             output_rx,
             child: Some(child),
             closed: false,
+            last_output: Instant::now(),
         })
     }
 
@@ -135,6 +138,7 @@ impl TerminalSession {
                 break;
             }
             self.parser.process(&bytes);
+            self.last_output = Instant::now();
             has_updates = true;
         }
         if self.closed && self.child.is_some() {
@@ -234,10 +238,15 @@ impl TerminalSession {
         screen_to_snapshot(&self.parser)
     }
 
-    /// The shell's OS pid, for asserting that `Drop` really reaps it.
-    #[cfg(test)]
-    fn child_pid(&self) -> Option<u32> {
+    /// The shell's OS pid, which the agent scan walks downwards from.
+    pub fn shell_pid(&self) -> Option<u32> {
         self.child.as_ref().and_then(|child| child.process_id())
+    }
+
+    /// How long the tab has been silent. A freshly spawned session starts at
+    /// zero because its prompt has not arrived yet.
+    pub fn output_age(&self) -> Duration {
+        self.last_output.elapsed()
     }
 }
 
@@ -845,7 +854,7 @@ mod tests {
     fn dropping_a_session_kills_and_reaps_the_shell() {
         let config = crate::config::AppConfig::default().terminal;
         let session = super::TerminalSession::new(10, 40, &config).expect("spawn a session");
-        let pid = session.child_pid().expect("the shell should report a pid");
+        let pid = session.shell_pid().expect("the shell should report a pid");
         assert!(process_exists(pid), "the shell should be running");
 
         drop(session);
@@ -866,7 +875,7 @@ mod tests {
     fn shutdown_then_drop_is_idempotent() {
         let config = crate::config::AppConfig::default().terminal;
         let mut session = super::TerminalSession::new(10, 40, &config).expect("spawn a session");
-        let pid = session.child_pid().expect("the shell should report a pid");
+        let pid = session.shell_pid().expect("the shell should report a pid");
 
         session.shutdown();
         assert!(

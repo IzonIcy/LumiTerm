@@ -1,4 +1,5 @@
 use crate::{
+    agent_status::{AgentMonitor, AgentState, AgentStatus, WatchTarget, post_notification},
     chrome_bridge::{ChromeBridge, OpacityProfile},
     config::AppConfig,
     pty::{CellStyle, StyledSpan, TerminalSession, TerminalSnapshot},
@@ -14,6 +15,7 @@ use vt100::Color;
 
 const MIN_TERM_COLS: u16 = 2;
 const MIN_TERM_ROWS: u16 = 2;
+const AGENT_SIDEBAR_WIDTH: f32 = 188.0;
 
 #[derive(Clone, Copy)]
 struct CellMetrics {
@@ -42,11 +44,15 @@ struct TrafficLightAction {
 }
 
 struct TerminalTab {
+    /// Stable across tab closes, unlike the index, so a scan result that is
+    /// still in flight can never land on the wrong tab.
+    id: u64,
     title: String,
     follow_output: bool,
     session: TerminalSession,
     snapshot: TerminalSnapshot,
     session_closed: bool,
+    agent: AgentStatus,
 }
 
 /// Outcome of checking the config file for a hot-reload.
@@ -134,6 +140,9 @@ pub struct LumiTermApp {
     config_path: Option<PathBuf>,
     config_mtime: Option<std::time::SystemTime>,
     last_config_poll: std::time::Instant,
+    agent_monitor: AgentMonitor,
+    agent_sidebar_open: bool,
+    next_tab_id: u64,
 }
 
 impl LumiTermApp {
@@ -148,11 +157,13 @@ impl LumiTermApp {
             .context("creating initial terminal session")?;
         let first_snapshot = first_session.snapshot();
         let tabs = vec![TerminalTab {
+            id: 1,
             title: "Shell 1".to_owned(),
             follow_output: true,
             session: first_session,
             snapshot: first_snapshot,
             session_closed: false,
+            agent: AgentStatus::default(),
         }];
 
         Ok(Self {
@@ -170,6 +181,9 @@ impl LumiTermApp {
             config_path: AppConfig::path().ok(),
             config_mtime: None,
             last_config_poll: std::time::Instant::now(),
+            agent_monitor: AgentMonitor::new(),
+            agent_sidebar_open: true,
+            next_tab_id: 2,
         })
     }
 
@@ -198,6 +212,9 @@ impl LumiTermApp {
             config_path: None,
             config_mtime: None,
             last_config_poll: std::time::Instant::now(),
+            agent_monitor: AgentMonitor::new(),
+            agent_sidebar_open: true,
+            next_tab_id: 1,
         }
     }
 
@@ -211,7 +228,9 @@ impl LumiTermApp {
     }
 
     fn create_tab(&mut self, title: impl Into<String>) {
-        match self.build_tab(title) {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        match self.build_tab(title, id) {
             Ok(tab) => {
                 self.tabs.push(tab);
                 self.chrome.set_tab_count(self.tabs.len());
@@ -238,16 +257,18 @@ impl LumiTermApp {
         self.chrome.set_active_tab(next);
     }
 
-    fn build_tab(&self, title: impl Into<String>) -> Result<TerminalTab> {
+    fn build_tab(&self, title: impl Into<String>, id: u64) -> Result<TerminalTab> {
         let session = TerminalSession::new(self.rows, self.cols, &self.config.terminal)
             .context("creating terminal session")?;
         let snapshot = session.snapshot();
         Ok(TerminalTab {
+            id,
             title: title.into(),
             follow_output: true,
             session,
             snapshot,
             session_closed: false,
+            agent: AgentStatus::default(),
         })
     }
 
@@ -261,6 +282,9 @@ impl LumiTermApp {
                     tab.snapshot = snapshot;
                     tab.follow_output = true;
                     tab.session_closed = false;
+                    // The old shell and anything under it are gone, so the
+                    // status starts over rather than reporting a stale exit.
+                    tab.agent = AgentStatus::default();
                     self.status_message = None;
                 }
                 Err(error) => {
@@ -494,6 +518,9 @@ impl LumiTermApp {
                         if draw_icon_button(ui, "▦", palette) {
                             self.select_next_tab();
                         }
+                        if draw_icon_button(ui, "▤", palette) {
+                            self.agent_sidebar_open = !self.agent_sidebar_open;
+                        }
                         ui.add_space(8.0);
                         ui.label(
                             RichText::new(&self.session_title)
@@ -547,6 +574,36 @@ impl LumiTermApp {
                     });
                 });
             });
+    }
+
+    /// The collapsible agent sidebar. Closed, it takes no room at all, so the
+    /// tab strip and the grid stay exactly as they were.
+    fn draw_agent_sidebar(&mut self, ui: &mut egui::Ui, palette: ChromePalette) {
+        let mut open = self.agent_sidebar_open;
+        let clicked = egui::Panel::right("agent-status-sidebar")
+            .exact_size(AGENT_SIDEBAR_WIDTH)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(
+                Frame::new()
+                    .fill(palette.tabbar_bg)
+                    .stroke(Stroke::new(1.0, palette.window_border.gamma_multiply(0.5)))
+                    .corner_radius(CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: 0,
+                        se: 16,
+                    })
+                    .inner_margin(Margin::symmetric(10, 8)),
+            )
+            .show_collapsible(ui, &mut open, |ui| {
+                draw_agent_rows(ui, &self.tabs, self.chrome.active_tab(), palette)
+            });
+        self.agent_sidebar_open = open;
+
+        if let Some(clicked) = clicked.and_then(|panel| panel.inner) {
+            self.chrome.set_active_tab(clicked);
+        }
     }
 
     fn draw_terminal_surface(
@@ -676,6 +733,35 @@ impl LumiTermApp {
         }
     }
 
+    /// Folds the newest background scan into each tab's agent status.
+    fn poll_agents(&mut self) {
+        self.agent_monitor.set_targets(
+            self.tabs
+                .iter()
+                .map(|tab| WatchTarget {
+                    id: tab.id,
+                    shell_pid: tab.session.shell_pid(),
+                })
+                .collect(),
+        );
+
+        let observations = self.agent_monitor.poll();
+        if observations.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        for observation in observations {
+            let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == observation.id) else {
+                continue;
+            };
+            if let Some(exit) = tab.agent.record(observation.agent, now)
+                && exit.should_notify()
+            {
+                post_notification(&exit.notification_body(&tab.title));
+            }
+        }
+    }
+
     /// Runs a scrollback search on the active tab, leaving the view at the
     /// nearest match at or above the current position.
     fn run_search(&mut self) -> Option<usize> {
@@ -757,6 +843,7 @@ impl eframe::App for LumiTermApp {
         let ctx = ui.ctx().clone();
         self.ingest_events(&ctx);
         self.poll_config_reload();
+        self.poll_agents();
 
         if let Some(tab) = self.active_tab_mut() {
             let has_updates = tab.session.poll_output();
@@ -806,6 +893,7 @@ impl eframe::App for LumiTermApp {
                 if self.search_open {
                     self.draw_search_bar(ui);
                 }
+                self.draw_agent_sidebar(ui, palette);
                 self.draw_terminal_surface(ui, palette, &ctx);
 
                 if let Some(status) = &self.status_message {
@@ -883,6 +971,73 @@ fn draw_tab_chip(
         .min_size(egui::vec2(90.0, 26.0)),
     )
     .clicked()
+}
+
+fn draw_agent_rows(
+    ui: &mut egui::Ui,
+    tabs: &[TerminalTab],
+    active: usize,
+    palette: ChromePalette,
+) -> Option<usize> {
+    ui.label(
+        RichText::new("AGENTS")
+            .size(11.0)
+            .strong()
+            .color(palette.text_muted),
+    );
+    ui.add_space(6.0);
+
+    let mut clicked = None;
+    for (index, tab) in tabs.iter().enumerate() {
+        let state = tab.agent.state(tab.session.output_age());
+        let name = tab.agent.agent_name().unwrap_or("no agent");
+        let (label, color) = agent_state_presentation(state, palette);
+        let selected = index == active;
+
+        let row = Frame::new()
+            .fill(if selected {
+                Color32::from_rgba_unmultiplied(108, 116, 141, 64)
+            } else {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 8)
+            })
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 3.5, color);
+                    ui.label(
+                        RichText::new(format!("#{} {}", index + 1, tab.title))
+                            .size(12.0)
+                            .color(if selected {
+                                palette.text_primary
+                            } else {
+                                palette.text_muted
+                            }),
+                    );
+                });
+                ui.label(
+                    RichText::new(format!("{name} · {label}"))
+                        .size(11.2)
+                        .color(color),
+                );
+            });
+
+        if row.response.interact(Sense::click()).clicked() {
+            clicked = Some(index);
+        }
+        ui.add_space(4.0);
+    }
+    clicked
+}
+
+fn agent_state_presentation(state: AgentState, palette: ChromePalette) -> (&'static str, Color32) {
+    match state {
+        AgentState::Running => ("running", Color32::from_rgb(112, 214, 146)),
+        AgentState::Idle => ("idle", Color32::from_rgb(232, 190, 100)),
+        AgentState::Exited => ("exited", Color32::from_rgb(228, 132, 132)),
+        AgentState::None => ("none", palette.text_muted),
+    }
 }
 
 fn draw_icon_button(ui: &mut egui::Ui, icon: &str, palette: ChromePalette) -> bool {

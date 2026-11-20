@@ -35,6 +35,29 @@ iTerm2 is the one you already have, and it does the things this does not: split 
 | `Shift+PageUp` / `Shift+PageDown` | Scroll ten lines |
 | `Ctrl+End` | Jump back to live output |
 
+## Agent status sidebar
+
+The panel on the right lists every tab and says whether a coding agent is running inside that tab's shell. It recognises `claude`, `codex`, `opencode`, `gemini`, `droid`, and `aider`, matched on the executable's basename. Click a row to switch to that tab. The `▤` button in the title bar collapses the panel, and when it is closed the grid takes the space back.
+
+Each tab shows one of four states:
+
+- **Running**: an agent process is alive under that tab's shell and the tab produced output in the last 10 seconds.
+- **Idle**: the agent process is alive but the tab has been silent for 10 seconds or more. A long tool call with no output looks the same.
+- **Exited**: an agent the sidebar had seen is gone. The state stays until another agent starts in that tab, or the tab's session restarts.
+- **None**: no agent has been seen in that tab.
+
+There is no shell integration, no prompt hook, and no environment variable involved. Every 3 seconds a background thread runs `ps -axo pid,ppid,comm` once, walks each tab's shell PID down through its descendants, and matches those executables against the agent list. That thread never runs on the render thread; results arrive over a channel.
+
+When an agent that ran for at least 10 seconds exits, a desktop notification goes out through `osascript`. Shorter runs are silent, so a mistyped command that starts and dies does not buzz you. Other platforms get no notification.
+
+What it cannot detect:
+
+- An agent whose executable is not named after the agent, such as a `claude` installed as a `node` script, or any wrapper script around it.
+- An agent that starts and exits between two scans. The sidebar samples every 3 seconds, so anything shorter can be missed.
+- An agent running under a different tab's shell. The walk is rooted at the tab's own shell PID, so sibling trees are ignored.
+- Anything inside tmux, SSH, or a container, where the process tree no longer looks like shell to agent.
+- How long an agent really ran. The run clock starts at the first scan that saw it, so an agent already running when Lumi-Term opens looks younger than it is.
+
 ## Config
 
 On first launch it writes a TOML config to one of these paths:
