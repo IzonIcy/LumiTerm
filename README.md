@@ -37,6 +37,8 @@ iTerm2 is the one you already have, and it does the things this does not: split 
 
 ## Agent status sidebar
 
+There is no recording of this yet. `docs/demo.md` has the sixty second capture script and what went wrong the last time it was shot.
+
 The panel on the right lists every tab and says whether a coding agent is running inside that tab's shell. It recognises `claude`, `codex`, `opencode`, `gemini`, `droid`, and `aider`, matched on the executable's basename. Click a row to switch to that tab. The `▤` button in the title bar collapses the panel, and when it is closed the grid takes the space back.
 
 Each tab shows one of four states:
